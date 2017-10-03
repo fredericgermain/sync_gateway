@@ -12,6 +12,7 @@ import (
 	"github.com/couchbase/sync_gateway/channels"
 	"github.com/couchbase/sync_gateway/db"
 	"runtime/debug"
+	"encoding/json"
 )
 
 // Testing utilities that have been included in the rest package so that they
@@ -190,6 +191,55 @@ func (rt *RestTester) Send(request *http.Request) *TestResponse {
 	response.Code = 200 // doesn't seem to be initialized by default; filed Go bug #4188
 	CreatePublicHandler(rt.ServerContext()).ServeHTTP(response, request)
 	return response
+}
+
+type changesResults struct {
+	Results []db.ChangeEntry
+}
+
+func (rt *RestTester) CreateWaitForChangesRetryWorker(numChangesExpected int, changesUrl, username string) (worker base.RetryWorker) {
+
+	waitForChangesWorker := func() (shouldRetry bool, err error, value interface{}) {
+
+		var changes changesResults
+
+		response := rt.Send(requestByUser("GET", changesUrl, "", username))
+		err = json.Unmarshal(response.Body.Bytes(), &changes)
+		if err != nil {
+			return false, err, nil
+		}
+		if len(changes.Results) < numChangesExpected {
+			// not enough results, retry
+			return true, nil, nil
+		}
+		// If it made it this far, there is no errors and it got enough changes
+		return false, nil, changes
+	}
+
+	return waitForChangesWorker
+
+}
+
+func (rt *RestTester) WaitForChanges(numChangesExpected int, changesUrl, username string) (changes changesResults, err error) {
+
+	waitForChangesWorker := rt.CreateWaitForChangesRetryWorker(numChangesExpected, changesUrl, username)
+
+	sleeper :=  base.CreateDoublingSleeperFunc(20, 10)
+
+	err, changesVal := base.RetryLoop("Wait for changes", waitForChangesWorker, sleeper)
+	if err != nil {
+		return changes, err
+	}
+
+	if changesVal == nil {
+		return changes, fmt.Errorf("Got nil value for changes")
+	}
+
+	if changesVal != nil {
+		changes = changesVal.(changesResults)
+	}
+
+	return changes, nil
 }
 
 func (rt *RestTester) SendAdminRequest(method, resource string, body string) *TestResponse {
