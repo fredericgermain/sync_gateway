@@ -20,9 +20,12 @@ import (
 	"github.com/couchbase/gomemcached"
 	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/satori/go.uuid"
+	"sync/atomic"
 )
 
 var dcpExpvars *expvar.Map
+
+var dcpReceiverId int32
 
 func init() {
 	dcpExpvars = expvar.NewMap("syncGateway_dcp")
@@ -95,6 +98,7 @@ type Receiver interface {
 // cbdatasource BucketDataSource.  See go-couchbase/cbdatasource for
 // additional details
 type DCPReceiver struct {
+	id int32
 	m                      sync.Mutex
 	bucket                 Bucket                         // For metadata persistence/retrieval
 	persistCheckpoints     bool                           // Whether this DCPReceiver should persist metadata to the bucket
@@ -106,8 +110,12 @@ type DCPReceiver struct {
 }
 
 func NewDCPReceiver(callback sgbucket.FeedEventCallbackFunc, bucket Bucket, maxVbNo uint16, persistCheckpoints bool) Receiver {
+
+	dcpReceiverId := atomic.AddInt32(&dcpReceiverId, 1)
+
 	// TODO: set using maxvbno
 	r := &DCPReceiver{
+		id: dcpReceiverId,
 		bucket:             bucket,
 		persistCheckpoints: persistCheckpoints,
 		seqs:               make([]uint64, maxVbNo),
@@ -117,7 +125,7 @@ func NewDCPReceiver(callback sgbucket.FeedEventCallbackFunc, bucket Bucket, maxV
 	r.callback = callback
 
 	if LogEnabledExcludingLogStar("DCP") {
-		LogTo("DCP", "Using DCP Logging Receiver")
+		LogTo("DCP", "Using DCP Logging Receiver.  Receiver ID: %d", r.id)
 		logRec := &DCPLoggingReceiver{rec: r}
 		return logRec
 	}
@@ -133,7 +141,7 @@ func (r *DCPReceiver) GetBucketNotifyFn() sgbucket.BucketNotifyFn {
 }
 
 func (r *DCPReceiver) OnError(err error) {
-	Warn("Error processing DCP stream - will attempt to restart/reconnect: %v", err)
+	Warn("Error processing DCP stream - will attempt to restart/reconnect: %v.  Receiver ID: %d", err, r.id)
 
 	// From cbdatasource:
 	//  Invoked in advisory fashion by the BucketDataSource when it
@@ -246,7 +254,7 @@ func (r *DCPReceiver) GetMetaData(vbucketId uint16) (
 // RollbackEx should be called by cbdatasource - Rollback required to maintain the interface.  In the event
 // it's called, logs warning and does a hard reset on metadata for the vbucket
 func (r *DCPReceiver) Rollback(vbucketId uint16, rollbackSeq uint64) error {
-	Warn("DCP Rollback request.  Expected RollbackEx call - resetting vbucket %d to 0", vbucketId)
+	Warn("DCP Rollback request.  Expected RollbackEx call - resetting vbucket %d to 0.  Receiver: %d", vbucketId, r.id)
 	dcpExpvars.Add("rollback_count", 1)
 	r.updateSeq(vbucketId, 0, false)
 	r.SetMetaData(vbucketId, nil)
@@ -256,7 +264,7 @@ func (r *DCPReceiver) Rollback(vbucketId uint16, rollbackSeq uint64) error {
 
 // RollbackEx includes the vbucketUUID needed to reset the metadata correctly
 func (r *DCPReceiver) RollbackEx(vbucketId uint16, vbucketUUID uint64, rollbackSeq uint64) error {
-	Warn("DCP RollbackEx request - rolling back DCP feed for: vbucketId: %d, rollbackSeq: %x", vbucketId, rollbackSeq)
+	Warn("DCP RollbackEx request - rolling back DCP feed for: vbucketId: %d, rollbackSeq: %x.  Receiver: %d", vbucketId, rollbackSeq, r.id)
 
 	dcpExpvars.Add("rollback_count", 1)
 	r.updateSeq(vbucketId, rollbackSeq, false)
